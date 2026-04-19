@@ -1,8 +1,8 @@
-# opencore-mos15
+# mos-opencore
 
 OpenCore source patches for running macOS 15 (Sequoia) as a guest in QEMU/KVM. Overlay on OpenCore 1.0.8.
 
-> **Status: v0.5 — experimental; not the active injection path.** The System-KC-injection feature in these patches is an open research item. The mos suite's active approach uses Boot-KC-only injection with a runtime kernel patcher ([mos15-patcher](https://github.com/MattJackson/mos15-patcher)). These patches remain here for the case where a kext genuinely needs a System-KC class as a direct linker dependency — we're not using that path today.
+> **Status: v0.5 — experimental; not the active injection path.** The System-KC-injection feature in these patches is an open research item. The mos suite's active approach uses Boot-KC-only injection with a runtime kernel patcher ([mos-patcher](https://github.com/MattJackson/mos-patcher)). These patches remain here for the case where a kext genuinely needs a System-KC class as a direct linker dependency — we're not using that path today.
 
 ## What this adds
 
@@ -37,7 +37,7 @@ The sealed APFS System volume is **not accessible from EFI** — only macOS's ow
 - Chained fixups apply correctly; 1590 symbols and 56 vtables resolved for `IOGraphicsFamily`.
 - A prototype `IOFramebuffer`-subclass kext (QEMUDisplay) still fails at `InternalPrelinkKext` with `Load Error` — likely one remaining unresolved symbol or a vtable edge case in the final link. Debugging requires `DisplayLevel` with `DEBUG_INFO` (`0x80000042`) to get the actual message.
 
-**Why it's not in the critical path right now:** the mos suite currently uses [mos15-patcher](https://github.com/MattJackson/mos15-patcher) to hook `IONDRVFramebuffer` in place from Boot KC, so no System KC injection is needed. The patches in this repo stay relevant if we ever want to ship a kext whose *static* link resolution requires a System-KC class (vs. hooking into an existing instance).
+**Why it's not in the critical path right now:** the mos suite currently uses [mos-patcher](https://github.com/MattJackson/mos-patcher) to hook `IONDRVFramebuffer` in place from Boot KC, so no System KC injection is needed. The patches in this repo stay relevant if we ever want to ship a kext whose *static* link resolution requires a System-KC class (vs. hooking into an existing instance).
 
 ## Usage
 
@@ -49,7 +49,7 @@ cd OpenCorePkg
 git checkout dab2d91b0cba3bf4d0da4ccf98a6576cc580cdaf   # 1.0.8
 
 # Apply our overlay
-git clone https://github.com/MattJackson/opencore-mos15 /tmp/opencore-mos15
+git clone https://github.com/MattJackson/mos-opencore /tmp/opencore-mos15
 cp -R /tmp/opencore-mos15/Include    .
 cp -R /tmp/opencore-mos15/Library    .
 cp -R /tmp/opencore-mos15/Utilities  .
@@ -65,9 +65,9 @@ Based on OpenCore 1.0.8 (commit `dab2d91b0cba3bf4d0da4ccf98a6576cc580cdaf`). Whe
 
 ## Part of the mos suite
 
-- [docker-macos](https://github.com/MattJackson/docker-macos) — Docker image, kext source, build pipeline
-- [qemu-mos15](https://github.com/MattJackson/qemu-mos15) — QEMU patches
-- [mos15-patcher](https://github.com/MattJackson/mos15-patcher) — kernel-side hook framework (Lilu replacement)
+- [mos-docker](https://github.com/MattJackson/mos-docker) — Docker image, kext source, build pipeline
+- [mos-qemu](https://github.com/MattJackson/mos-qemu) — QEMU patches
+- [mos-patcher](https://github.com/MattJackson/mos-patcher) — kernel-side hook framework (Lilu replacement)
 
 ## License
 
