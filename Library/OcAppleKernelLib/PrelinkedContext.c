@@ -474,7 +474,7 @@ PrelinkedContextFree (
   }
 
   //
-  // OpenCore15: Free System KC buffer if loaded.
+  // Free System KC buffer if loaded.
   //
   if (Context->SystemKC != NULL) {
     FreePool (Context->SystemKC);
@@ -497,6 +497,143 @@ PrelinkedContextFree (
   ZeroMem (&Context->InjectedKexts, sizeof (Context->InjectedKexts));
 }
 
+/**
+  Apply DYLD chained fixups to an on-disk kernel collection Mach-O.
+
+  A kernel collection ships with LC_DYLD_CHAINED_FIXUPS describing a chain
+  of rebase entries that dyld (or, at boot time, the kernel loader) walks
+  to materialise raw pointers in the collection's data segments. When we
+  want to consult the collection pre-boot we must perform the same walk
+  ourselves, otherwise the pointers we later read (symbol table entries,
+  vtables, etc.) are still encoded fixup values.
+
+  Only the x86_64 and arm64e kernel-cache pointer formats are supported.
+
+  @param[in]      Buffer         Pointer to the collection Mach-O buffer.
+  @param[in]      MachContext    Initialised Mach-O context for Buffer.
+  @param[out]     FixupCountOut  Optional, populated with the total number
+                                 of rebases that were resolved.
+
+  @retval EFI_SUCCESS            Fixups applied (or none present).
+  @retval EFI_UNSUPPORTED        LC_DYLD_CHAINED_FIXUPS not present.
+**/
+STATIC
+EFI_STATUS
+InternalApplyKernelCollectionFixups (
+  IN  UINT8              *Buffer,
+  IN  OC_MACHO_CONTEXT   *MachContext,
+  OUT UINT32             *FixupCountOut  OPTIONAL
+  )
+{
+  MACH_HEADER_64                                *Header;
+  MACH_LOAD_COMMAND                             *LoadCmd;
+  MACH_LINKEDIT_DATA_COMMAND                    *ChainedFixupsCmd;
+  MACHO_DYLD_CHAINED_FIXUPS_HEADER              *FixupsHeader;
+  MACH_DYLD_CHAINED_STARTS_IN_IMAGE             *StartsInImage;
+  MACH_DYLD_CHAINED_STARTS_IN_SEGMENT           *StartsInSeg;
+  MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE_REBASE  *Fixup;
+  UINT32                                        CmdIndex;
+  UINT32                                        CmdOffset;
+  UINT32                                        SegIndex;
+  UINT32                                        PageIndex;
+  UINT32                                        FixupCount;
+  UINT16                                        PageStart;
+  UINT64                                        *FixupLocation;
+
+  ChainedFixupsCmd = NULL;
+  Header           = MachoGetMachHeader64 (MachContext);
+  if (Header == NULL) {
+    return EFI_UNSUPPORTED;
+  }
+
+  CmdOffset = sizeof (MACH_HEADER_64);
+  for (CmdIndex = 0; CmdIndex < Header->NumCommands; ++CmdIndex) {
+    LoadCmd = (MACH_LOAD_COMMAND *)(Buffer + CmdOffset);
+    if (LoadCmd->CommandType == MACH_LOAD_COMMAND_DYLD_CHAINED_FIXUPS) {
+      ChainedFixupsCmd = (MACH_LINKEDIT_DATA_COMMAND *)LoadCmd;
+      break;
+    }
+
+    CmdOffset += LoadCmd->CommandSize;
+  }
+
+  if (ChainedFixupsCmd == NULL) {
+    if (FixupCountOut != NULL) {
+      *FixupCountOut = 0;
+    }
+
+    return EFI_UNSUPPORTED;
+  }
+
+  FixupsHeader  = (MACHO_DYLD_CHAINED_FIXUPS_HEADER *)(Buffer + ChainedFixupsCmd->DataOffset);
+  StartsInImage = (MACH_DYLD_CHAINED_STARTS_IN_IMAGE *)(
+                    (UINT8 *)FixupsHeader + FixupsHeader->StartsOffset
+                    );
+
+  FixupCount = 0;
+
+  for (SegIndex = 0; SegIndex < StartsInImage->NumSegments; ++SegIndex) {
+    if (StartsInImage->SegInfoOffset[SegIndex] == 0) {
+      continue;
+    }
+
+    StartsInSeg = (MACH_DYLD_CHAINED_STARTS_IN_SEGMENT *)(
+                    (UINT8 *)StartsInImage + StartsInImage->SegInfoOffset[SegIndex]
+                    );
+
+    if (  (StartsInSeg->PointerFormat != MACH_DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE)
+       && (StartsInSeg->PointerFormat != MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE))
+    {
+      continue;
+    }
+
+    for (PageIndex = 0; PageIndex < StartsInSeg->PageCount; ++PageIndex) {
+      PageStart = StartsInSeg->PageStart[PageIndex];
+      if (PageStart == MACH_DYLD_CHAINED_PTR_START_NONE) {
+        continue;
+      }
+
+      FixupLocation = (UINT64 *)(
+                        Buffer + StartsInSeg->SegmentOffset
+                        + (UINT64)PageIndex * StartsInSeg->PageSize
+                        + PageStart
+                        );
+
+      while (TRUE) {
+        Fixup = (MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE_REBASE *)FixupLocation;
+
+        //
+        // For cacheLevel 0 (this KC) the Target field is the resolved
+        // virtual address; for cacheLevel 1 the target is a virtual
+        // address in a different KC but the encoding is the same. In
+        // either case we write Target in place of the fixup slot.
+        //
+        *FixupLocation = Fixup->Target;
+        ++FixupCount;
+
+        if (Fixup->Next == 0) {
+          break;
+        }
+
+        //
+        // Stride is 1 byte for x86_64 kernel cache, 4 bytes for arm64e.
+        //
+        if (StartsInSeg->PointerFormat == MACH_DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE) {
+          FixupLocation = (UINT64 *)((UINT8 *)FixupLocation + Fixup->Next);
+        } else {
+          FixupLocation = (UINT64 *)((UINT8 *)FixupLocation + Fixup->Next * 4);
+        }
+      }
+    }
+  }
+
+  if (FixupCountOut != NULL) {
+    *FixupCountOut = FixupCount;
+  }
+
+  return EFI_SUCCESS;
+}
+
 EFI_STATUS
 PrelinkedContextLoadSystemKC (
   IN OUT  PRELINKED_CONTEXT  *Context,
@@ -504,18 +641,20 @@ PrelinkedContextLoadSystemKC (
   IN      UINT32             SystemKCSize
   )
 {
+  EFI_STATUS               Status;
   MACH_SEGMENT_COMMAND_64  *Segment;
+  UINT32                   FixupCount;
 
   ASSERT (Context != NULL);
   ASSERT (SystemKC != NULL);
   ASSERT (SystemKCSize > 0);
 
-  Context->SystemKC     = SystemKC;
-  Context->SystemKCSize = SystemKCSize;
+  Context->SystemKC      = SystemKC;
+  Context->SystemKCSize  = SystemKCSize;
   Context->SystemKCValid = FALSE;
 
   //
-  // Initialize Mach-O context for the System KC.
+  // Initialise the Mach-O context covering the entire System KC.
   //
   if (!MachoInitializeContext64 (
          &Context->SystemKCMachContext,
@@ -525,17 +664,18 @@ PrelinkedContextLoadSystemKC (
          SystemKCSize
          ))
   {
-    DEBUG ((DEBUG_WARN, "OCAK: OpenCore15 - Failed to init System KC Mach-O context\n"));
+    DEBUG ((DEBUG_WARN, "OCAK: System KC header is not a valid Mach-O\n"));
     return EFI_INVALID_PARAMETER;
   }
 
   //
-  // The System KC is different from the Boot KC:
-  // - Boot KC has __TEXT_EXEC (embedded kernel) — symtab comes from inner context
-  // - System KC has NO __TEXT_EXEC — it's just kexts, symtab is in the outer KC directly
-  //
-  // Try __TEXT_EXEC first (Boot KC style), fall back to using the outer context
-  // directly for symtab (System KC style).
+  // Two supported KC shapes:
+  //   1. Boot KC  - contains an embedded kernel in the __TEXT_EXEC segment.
+  //                 Its LC_SYMTAB lives in the inner (kernel) context.
+  //   2. System KC - kexts only, no embedded kernel. LC_SYMTAB lives in the
+  //                 outer Mach-O header.
+  // We probe for __TEXT_EXEC and set up the inner context accordingly so
+  // that MachoInitialiseSymtabsExternal () works in either case.
   //
   Segment = MachoGetSegmentByName64 (
               &Context->SystemKCMachContext,
@@ -543,9 +683,6 @@ PrelinkedContextLoadSystemKC (
               );
 
   if ((Segment != NULL) && (Segment->VirtualAddress >= Segment->FileOffset)) {
-    //
-    // Boot KC style: inner context at __TEXT_EXEC.
-    //
     if (!MachoInitializeContext64 (
            &Context->SystemKCInnerMachContext,
            SystemKC,
@@ -554,137 +691,48 @@ PrelinkedContextLoadSystemKC (
            (UINT32)(SystemKCSize - Segment->FileOffset)
            ))
     {
-      DEBUG ((DEBUG_WARN, "OCAK: OpenCore15 - Failed to init System KC inner context\n"));
+      DEBUG ((DEBUG_WARN, "OCAK: System KC __TEXT_EXEC inner init failed\n"));
       return EFI_INVALID_PARAMETER;
     }
 
-    MachoInitialiseSymtabsExternal (&Context->SystemKCMachContext, &Context->SystemKCInnerMachContext);
-    DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - System KC symtab connected via __TEXT_EXEC\n"));
+    MachoInitialiseSymtabsExternal (
+      &Context->SystemKCMachContext,
+      &Context->SystemKCInnerMachContext
+      );
   } else {
     //
-    // System KC style: no inner kernel. The LC_SYMTAB is in the outer
-    // Mach-O header. Copy outer context as inner so fileset kexts can
-    // use MachoInitialiseSymtabsExternal with it.
+    // No __TEXT_EXEC: the outer header already owns LC_SYMTAB. Clone the
+    // outer context as the inner context so dependents can uniformly call
+    // MachoInitialiseSymtabsExternal ().
     //
-    CopyMem (&Context->SystemKCInnerMachContext, &Context->SystemKCMachContext, sizeof (OC_MACHO_CONTEXT));
-    DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - System KC using outer context for symtab (no __TEXT_EXEC)\n"));
+    CopyMem (
+      &Context->SystemKCInnerMachContext,
+      &Context->SystemKCMachContext,
+      sizeof (OC_MACHO_CONTEXT)
+      );
   }
 
   //
-  // OpenCore15: Apply chained fixups to resolve raw pointers in the System KC.
-  // The on-disk binary has DYLD chained fixup entries instead of real pointers.
-  // Walk the fixup chains and resolve each rebase to its target address.
+  // Apply LC_DYLD_CHAINED_FIXUPS on the outer KC so downstream pointer
+  // reads (e.g. vtable patching) observe real virtual addresses.
   //
-  {
-    MACH_LOAD_COMMAND                       *LoadCmd;
-    MACH_LINKEDIT_DATA_COMMAND              *ChainedFixupsCmd;
-    MACHO_DYLD_CHAINED_FIXUPS_HEADER        *FixupsHeader;
-    MACH_DYLD_CHAINED_STARTS_IN_IMAGE       *StartsInImage;
-    MACH_DYLD_CHAINED_STARTS_IN_SEGMENT     *StartsInSeg;
-    MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE_REBASE  *Fixup;
-    MACH_HEADER_64                          *SysKCHeader;
-    UINT32                                  CmdIndex;
-    UINT32                                  CmdOffset;
-    UINT32                                  SegIndex;
-    UINT32                                  PageIndex;
-    UINT32                                  FixupCount;
-    UINT16                                  PageStart;
-    UINT64                                  *FixupLocation;
-    UINT64                                  SegFileOffset;
-
-    ChainedFixupsCmd = NULL;
-    SysKCHeader = MachoGetMachHeader64 (&Context->SystemKCMachContext);
-
-    if (SysKCHeader != NULL) {
-      CmdOffset = sizeof (MACH_HEADER_64);
-      for (CmdIndex = 0; CmdIndex < SysKCHeader->NumCommands; ++CmdIndex) {
-        LoadCmd = (MACH_LOAD_COMMAND *)(SystemKC + CmdOffset);
-        if (LoadCmd->CommandType == MACH_LOAD_COMMAND_DYLD_CHAINED_FIXUPS) {
-          ChainedFixupsCmd = (MACH_LINKEDIT_DATA_COMMAND *)LoadCmd;
-          break;
-        }
-
-        CmdOffset += LoadCmd->CommandSize;
-      }
-    }
-
-    if (ChainedFixupsCmd != NULL) {
-      FixupsHeader = (MACHO_DYLD_CHAINED_FIXUPS_HEADER *)(SystemKC + ChainedFixupsCmd->DataOffset);
-      StartsInImage = (MACH_DYLD_CHAINED_STARTS_IN_IMAGE *)(
-                        (UINT8 *)FixupsHeader + FixupsHeader->StartsOffset
-                        );
-
-      FixupCount = 0;
-
-      for (SegIndex = 0; SegIndex < StartsInImage->NumSegments; ++SegIndex) {
-        if (StartsInImage->SegInfoOffset[SegIndex] == 0) {
-          continue;
-        }
-
-        StartsInSeg = (MACH_DYLD_CHAINED_STARTS_IN_SEGMENT *)(
-                        (UINT8 *)StartsInImage + StartsInImage->SegInfoOffset[SegIndex]
-                        );
-
-        //
-        // Only handle x86_64 kernel cache format (stride 1).
-        //
-        if (  (StartsInSeg->PointerFormat != MACH_DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE)
-           && (StartsInSeg->PointerFormat != MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE))
-        {
-          continue;
-        }
-
-        SegFileOffset = StartsInSeg->SegmentOffset;
-
-        for (PageIndex = 0; PageIndex < StartsInSeg->PageCount; ++PageIndex) {
-          PageStart = StartsInSeg->PageStart[PageIndex];
-          if (PageStart == MACH_DYLD_CHAINED_PTR_START_NONE) {
-            continue;
-          }
-
-          //
-          // Walk the fixup chain for this page.
-          //
-          FixupLocation = (UINT64 *)(
-                            SystemKC + SegFileOffset
-                            + (UINT64)PageIndex * StartsInSeg->PageSize
-                            + PageStart
-                            );
-
-          while (TRUE) {
-            Fixup = (MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE_REBASE *)FixupLocation;
-
-            //
-            // Resolve the fixup: write the target address.
-            // For cacheLevel 0, Target is the direct virtual address.
-            //
-            *FixupLocation = Fixup->Target;
-            ++FixupCount;
-
-            if (Fixup->Next == 0) {
-              break;
-            }
-
-            //
-            // Stride is 1 for x86_64 kernel cache, 4 for arm64.
-            //
-            if (StartsInSeg->PointerFormat == MACH_DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE) {
-              FixupLocation = (UINT64 *)((UINT8 *)FixupLocation + Fixup->Next);
-            } else {
-              FixupLocation = (UINT64 *)((UINT8 *)FixupLocation + Fixup->Next * 4);
-            }
-          }
-        }
-      }
-
-      DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - Applied %u chained fixups to System KC\n", FixupCount));
-    } else {
-      DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - No LC_DYLD_CHAINED_FIXUPS in System KC\n"));
-    }
+  FixupCount = 0;
+  Status     = InternalApplyKernelCollectionFixups (
+                 SystemKC,
+                 &Context->SystemKCMachContext,
+                 &FixupCount
+                 );
+  if (EFI_ERROR (Status) && (Status != EFI_UNSUPPORTED)) {
+    return Status;
   }
 
   Context->SystemKCValid = TRUE;
-  DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - System KC ready (%u bytes)\n", SystemKCSize));
+  DEBUG ((
+    DEBUG_INFO,
+    "OCAK: System KC ready (%u bytes, %u chained fixups)\n",
+    SystemKCSize,
+    FixupCount
+    ));
 
   return EFI_SUCCESS;
 }

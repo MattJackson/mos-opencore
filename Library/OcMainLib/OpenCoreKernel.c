@@ -21,7 +21,6 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #include <Library/MemoryAllocationLib.h>
 #include <Library/OcAfterBootCompatLib.h>
 #include <Library/OcAppleKernelLib.h>
-#include <Library/OcFileLib.h>
 #include <Library/OcMiscLib.h>
 #include <Library/OcAppleImg4Lib.h>
 #include <Library/OcStringLib.h>
@@ -42,14 +41,15 @@ STATIC CACHELESS_CONTEXT  mOcCachelessContext;
 STATIC BOOLEAN            mOcCachelessInProgress;
 
 STATIC EFI_FILE_PROTOCOL  *mCustomKernelDirectory;
+STATIC BOOLEAN            mCustomKernelDirectoryInProgress;
 
 //
-// OpenCore15: System KC data loaded during file hook for dependency resolution.
+// System KC staged on the EFI partition, read on demand in OcKernelFileOpen
+// and consumed by OcKernelProcessPrelinked.
 //
-STATIC UINT8   *mSystemKCData;
-STATIC UINT32  mSystemKCDataSize;
-STATIC BOOLEAN mSystemKCLoaded;
-STATIC BOOLEAN            mCustomKernelDirectoryInProgress;
+STATIC UINT8    *mSystemKCData;
+STATIC UINT32   mSystemKCDataSize;
+STATIC BOOLEAN  mSystemKCLoaded;
 
 STATIC
 VOID
@@ -773,15 +773,14 @@ OcKernelInjectKexts (
 
 EFI_STATUS
 OcKernelProcessPrelinked (
-  IN     OC_GLOBAL_CONFIG   *Config,
-  IN     UINT32             DarwinVersion,
-  IN     BOOLEAN            Is32Bit,
-  IN OUT UINT8              *Kernel,
-  IN     UINT32             *KernelSize,
-  IN     UINT32             AllocatedSize,
-  IN     UINT32             LinkedExpansion,
-  IN     UINT32             ReservedExeSize,
-  IN     EFI_FILE_PROTOCOL  *RootFile  OPTIONAL
+  IN     OC_GLOBAL_CONFIG  *Config,
+  IN     UINT32            DarwinVersion,
+  IN     BOOLEAN           Is32Bit,
+  IN OUT UINT8             *Kernel,
+  IN     UINT32            *KernelSize,
+  IN     UINT32            AllocatedSize,
+  IN     UINT32            LinkedExpansion,
+  IN     UINT32            ReservedExeSize
   )
 {
   EFI_STATUS         Status;
@@ -792,20 +791,21 @@ OcKernelProcessPrelinked (
 
   if (!EFI_ERROR (Status)) {
     //
-    // OpenCore15: If System KC data was loaded earlier during the file hook,
-    // initialize the System KC context for dependency resolution.
+    // If a System KC was loaded from the EFI partition (see
+    // OcKernelFileOpen ()), hand ownership of the buffer to the prelinked
+    // context so cross-KC dependencies resolve at prelink time. On
+    // non-KC boots the data is absent and this is a no-op.
     //
     if (Context.IsKernelCollection && mSystemKCLoaded && (mSystemKCData != NULL)) {
       SystemKCStatus = PrelinkedContextLoadSystemKC (&Context, mSystemKCData, mSystemKCDataSize);
-      if (!EFI_ERROR (SystemKCStatus)) {
-        DEBUG ((DEBUG_INFO, "OC: OpenCore15 - System KC context initialized from pre-loaded data\n"));
-      } else {
-        DEBUG ((DEBUG_WARN, "OC: OpenCore15 - System KC parse failed - %r\n", SystemKCStatus));
+      if (EFI_ERROR (SystemKCStatus)) {
+        DEBUG ((DEBUG_WARN, "OC: System KC parse failed - %r\n", SystemKCStatus));
       }
 
       //
-      // Transfer ownership: the context now owns the buffer (freed via PrelinkedContextFree).
-      // Clear the global so we don't double-free.
+      // Ownership of mSystemKCData transfers to the prelinked context
+      // (freed via PrelinkedContextFree). Clear the globals so we don't
+      // attempt a double-free or reuse stale data on the next pass.
       //
       mSystemKCData   = NULL;
       mSystemKCLoaded = FALSE;
@@ -1351,10 +1351,16 @@ OcKernelFileOpen (
         );
 
       //
-      // OpenCore15: Load System KC from the OpenCore EFI partition.
-      // The System KC is shipped as EFI/OC/SystemKernelExtensions.kc on the
-      // OpenCore partition. It was extracted from the macOS install and provides
-      // IOGraphicsFamily and other System KC dependencies for kext injection.
+      // Optionally load the System KC from the OpenCore EFI partition.
+      //
+      // The sealed APFS system volume cannot be read from EFI, so the
+      // System KC must be staged on the OpenCore ESP as
+      //   EFI/OC/SystemKernelExtensions.kc
+      // extracted from the booting macOS install. When absent OpenCore
+      // continues to behave as before (Boot KC only injection).
+      //
+      // The buffer's ownership is handed to OcKernelProcessPrelinked ()
+      // below and freed through PrelinkedContextFree ().
       //
       if (!mSystemKCLoaded && (mOcStorage != NULL)) {
         UINT32  SystemKCFileSize;
@@ -1368,9 +1374,11 @@ OcKernelFileOpen (
         if (mSystemKCData != NULL) {
           mSystemKCDataSize = SystemKCFileSize;
           mSystemKCLoaded   = TRUE;
-          DEBUG ((DEBUG_INFO, "OC: OpenCore15 - System KC loaded from EFI partition (%u bytes)\n", SystemKCFileSize));
-        } else {
-          DEBUG ((DEBUG_INFO, "OC: OpenCore15 - SystemKernelExtensions.kc not found on EFI partition\n"));
+          DEBUG ((
+            DEBUG_INFO,
+            "OC: System KC loaded from EFI partition (%u bytes)\n",
+            SystemKCFileSize
+            ));
         }
       }
 
@@ -1382,8 +1390,7 @@ OcKernelFileOpen (
                           &KernelSize,
                           AllocatedSize,
                           LinkedExpansion,
-                          ReservedExeSize,
-                          This
+                          ReservedExeSize
                           );
 
       DEBUG ((DEBUG_INFO, "OC: Prelinked status - %r\n", PrelinkedStatus));

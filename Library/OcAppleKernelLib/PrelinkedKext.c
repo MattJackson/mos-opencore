@@ -28,19 +28,131 @@
 #include "PrelinkedInternal.h"
 
 /**
-  OpenCore15: Search System KC fileset entries for a kext by bundle identifier.
-  When found, creates a PRELINKED_KEXT with a real MachContext pointing into
-  the System KC buffer, enabling proper symbol table and vtable resolution.
+  Apply LC_DYLD_CHAINED_FIXUPS for a single fileset kext's own fixup chains.
 
-  The MachContext is initialized the same way Boot KC kexts are initialized —
-  with the entire KC buffer as FileData and the fileset entry's FileOffset as
-  HeaderOffset. This allows the kext's Mach-O parser to follow LC_SYMTAB
-  references into the shared __LINKEDIT.
+  Each System KC fileset entry ships its own chained-fixup table covering
+  the kext's data segments. Applying these in-place converts encoded fixup
+  slots into resolved virtual addresses so later vtable patching observes
+  real pointers.
 
-  @param[in,out] Prelinked   Prelinked context with SystemKC loaded.
-  @param[in]     Identifier  Bundle identifier to search for.
+  @param[in]  KCBuffer   Pointer to the containing kernel collection buffer.
+  @param[in]  KextCtx    Mach-O context for the fileset kext.
 
-  @return  PRELINKED_KEXT on success, NULL if not found.
+  @return  Count of fixup slots resolved (may be 0 if no fixup command).
+**/
+STATIC
+UINT32
+InternalApplyFilesetKextFixups (
+  IN  UINT8             *KCBuffer,
+  IN  OC_MACHO_CONTEXT  *KextCtx
+  )
+{
+  MACH_HEADER_64                                *Header;
+  MACH_LOAD_COMMAND                             *LoadCmd;
+  MACH_LINKEDIT_DATA_COMMAND                    *FixupsCmd;
+  MACHO_DYLD_CHAINED_FIXUPS_HEADER              *FixupsHdr;
+  MACH_DYLD_CHAINED_STARTS_IN_IMAGE             *Starts;
+  MACH_DYLD_CHAINED_STARTS_IN_SEGMENT           *StartsSeg;
+  MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE_REBASE  *Fixup;
+  UINT32                                        CmdIdx;
+  UINT32                                        CmdOff;
+  UINT32                                        SegIdx;
+  UINT32                                        PageIdx;
+  UINT32                                        Resolved;
+  UINT64                                        *FixupLoc;
+
+  FixupsCmd = NULL;
+  Header    = MachoGetMachHeader64 (KextCtx);
+  if (Header == NULL) {
+    return 0;
+  }
+
+  CmdOff = (UINT32)((UINT8 *)Header - KCBuffer) + sizeof (MACH_HEADER_64);
+  for (CmdIdx = 0; CmdIdx < Header->NumCommands; ++CmdIdx) {
+    LoadCmd = (MACH_LOAD_COMMAND *)(KCBuffer + CmdOff);
+    if (LoadCmd->CommandType == MACH_LOAD_COMMAND_DYLD_CHAINED_FIXUPS) {
+      FixupsCmd = (MACH_LINKEDIT_DATA_COMMAND *)LoadCmd;
+      break;
+    }
+
+    CmdOff += LoadCmd->CommandSize;
+  }
+
+  if (FixupsCmd == NULL) {
+    return 0;
+  }
+
+  FixupsHdr = (MACHO_DYLD_CHAINED_FIXUPS_HEADER *)(KCBuffer + FixupsCmd->DataOffset);
+  Starts    = (MACH_DYLD_CHAINED_STARTS_IN_IMAGE *)(
+                (UINT8 *)FixupsHdr + FixupsHdr->StartsOffset
+                );
+
+  Resolved = 0;
+
+  for (SegIdx = 0; SegIdx < Starts->NumSegments; ++SegIdx) {
+    if (Starts->SegInfoOffset[SegIdx] == 0) {
+      continue;
+    }
+
+    StartsSeg = (MACH_DYLD_CHAINED_STARTS_IN_SEGMENT *)(
+                  (UINT8 *)Starts + Starts->SegInfoOffset[SegIdx]
+                  );
+
+    if (  (StartsSeg->PointerFormat != MACH_DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE)
+       && (StartsSeg->PointerFormat != MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE))
+    {
+      continue;
+    }
+
+    for (PageIdx = 0; PageIdx < StartsSeg->PageCount; ++PageIdx) {
+      if (StartsSeg->PageStart[PageIdx] == MACH_DYLD_CHAINED_PTR_START_NONE) {
+        continue;
+      }
+
+      FixupLoc = (UINT64 *)(
+                   KCBuffer + StartsSeg->SegmentOffset
+                   + (UINT64)PageIdx * StartsSeg->PageSize
+                   + StartsSeg->PageStart[PageIdx]
+                   );
+
+      while (TRUE) {
+        Fixup = (MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE_REBASE *)FixupLoc;
+
+        //
+        // CacheLevel 0 references the current KC, CacheLevel 1 references
+        // another KC in the same cold boot. Both encode the resolved
+        // virtual address directly in the Target bitfield.
+        //
+        *FixupLoc = (UINT64)Fixup->Target;
+        ++Resolved;
+
+        if (Fixup->Next == 0) {
+          break;
+        }
+
+        FixupLoc = (UINT64 *)((UINT8 *)FixupLoc + Fixup->Next);
+      }
+    }
+  }
+
+  return Resolved;
+}
+
+/**
+  Look up a kext by bundle identifier among the LC_FILESET_ENTRY load
+  commands of a System KC and materialise a PRELINKED_KEXT that aliases
+  the existing KC buffer.
+
+  The resulting PRELINKED_KEXT borrows its Mach-O data from the System KC
+  and wires its symtab via MachoInitialiseSymtabsExternal () to the System
+  KC's shared inner context, matching how Boot KC dependents are set up
+  by InternalCreatePrelinkedKext ().
+
+  @param[in,out] Prelinked   Prelinked context with a loaded System KC.
+  @param[in]     Identifier  Bundle identifier to resolve.
+
+  @retval  Allocated PRELINKED_KEXT on success; caller owns the allocation.
+  @retval  NULL if Identifier is not present in the System KC.
 **/
 STATIC
 PRELINKED_KEXT *
@@ -49,15 +161,16 @@ InternalFindSystemKCDependency (
   IN     CONST CHAR8        *Identifier
   )
 {
-  MACH_HEADER_64                  *Header;
-  MACH_LOAD_COMMAND               *Command;
-  MACH_FILESET_ENTRY_COMMAND      *FilesetEntry;
-  UINT32                          CmdIndex;
-  UINT32                          CmdOffset;
-  CONST CHAR8                     *EntryName;
-  PRELINKED_KEXT                  *NewKext;
+  MACH_HEADER_64              *Header;
+  MACH_LOAD_COMMAND           *Command;
+  MACH_FILESET_ENTRY_COMMAND  *FilesetEntry;
+  UINT32                      CmdIndex;
+  UINT32                      CmdOffset;
+  UINT32                      FixupCount;
+  CONST CHAR8                 *EntryName;
+  PRELINKED_KEXT              *NewKext;
 
-  if (!Prelinked->SystemKCValid || Prelinked->SystemKC == NULL) {
+  if (!Prelinked->SystemKCValid || (Prelinked->SystemKC == NULL)) {
     return NULL;
   }
 
@@ -66,9 +179,6 @@ InternalFindSystemKCDependency (
     return NULL;
   }
 
-  //
-  // Walk all load commands looking for LC_FILESET_ENTRY matching our Identifier.
-  //
   CmdOffset = sizeof (MACH_HEADER_64);
 
   for (CmdIndex = 0; CmdIndex < Header->NumCommands; ++CmdIndex) {
@@ -78,179 +188,74 @@ InternalFindSystemKCDependency (
 
     Command = (MACH_LOAD_COMMAND *)((UINT8 *)Header + CmdOffset);
 
-    if (Command->CommandType == MACH_LOAD_COMMAND_FILESET_ENTRY) {
-      FilesetEntry = (MACH_FILESET_ENTRY_COMMAND *)Command;
-      EntryName    = (CONST CHAR8 *)((UINT8 *)FilesetEntry + FilesetEntry->EntryId.Offset);
-
-      if (AsciiStrCmp (EntryName, Identifier) == 0) {
-        DEBUG ((
-          DEBUG_INFO,
-          "OCAK: OpenCore15 - Found %a in System KC at offset 0x%Lx VA 0x%Lx\n",
-          Identifier,
-          FilesetEntry->FileOffset,
-          FilesetEntry->VirtualAddress
-          ));
-
-        //
-        // Create a PRELINKED_KEXT with MachContext pointing into System KC.
-        // Use the same pattern as Boot KC kexts in InternalCreatePrelinkedKext:
-        // - FileData = entire System KC buffer (offset 0)
-        // - HeaderOffset = fileset entry's FileOffset
-        // - InnerSize = estimated kext size (use remaining buffer)
-        //
-        // This lets the Mach-O parser follow LC_SYMTAB and other references
-        // into the shared __LINKEDIT segment within the System KC.
-        //
-        NewKext = AllocateZeroPool (sizeof (*NewKext));
-        if (NewKext == NULL) {
-          return NULL;
-        }
-
-        if (!MachoInitializeContext64 (
-               &NewKext->Context.MachContext,
-               Prelinked->SystemKC,
-               Prelinked->SystemKCSize,
-               (UINT32)FilesetEntry->FileOffset,
-               (UINT32)(Prelinked->SystemKCSize - FilesetEntry->FileOffset)
-               ))
-        {
-          DEBUG ((DEBUG_WARN, "OCAK: OpenCore15 - Failed to init MachContext for %a\n", Identifier));
-          FreePool (NewKext);
-          return NULL;
-        }
-
-        //
-        // OpenCore15: Apply chained fixups within this kext's own Mach-O.
-        // Each fileset kext has its own LC_DYLD_CHAINED_FIXUPS with fixup
-        // chains for its data segments. Without resolving these, vtable
-        // pointers are encoded fixup values instead of real addresses.
-        //
-        {
-          MACH_HEADER_64                                *KextHeader;
-          MACH_LOAD_COMMAND                             *KextCmd;
-          MACH_LINKEDIT_DATA_COMMAND                    *KextFixupsCmd;
-          MACHO_DYLD_CHAINED_FIXUPS_HEADER              *KextFixupsHdr;
-          MACH_DYLD_CHAINED_STARTS_IN_IMAGE             *KextStarts;
-          MACH_DYLD_CHAINED_STARTS_IN_SEGMENT           *KextStartsSeg;
-          MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE_REBASE  *KextFixup;
-          UINT32                                        KextCmdIdx;
-          UINT32                                        KextCmdOff;
-          UINT32                                        KextSegIdx;
-          UINT32                                        KextPageIdx;
-          UINT32                                        KextFixupCount;
-          UINT64                                        *KextFixupLoc;
-
-          KextFixupsCmd = NULL;
-          KextHeader    = MachoGetMachHeader64 (&NewKext->Context.MachContext);
-
-          if (KextHeader != NULL) {
-            KextCmdOff = (UINT32)((UINT8 *)KextHeader - Prelinked->SystemKC) + sizeof (MACH_HEADER_64);
-            for (KextCmdIdx = 0; KextCmdIdx < KextHeader->NumCommands; ++KextCmdIdx) {
-              KextCmd = (MACH_LOAD_COMMAND *)(Prelinked->SystemKC + KextCmdOff);
-              if (KextCmd->CommandType == MACH_LOAD_COMMAND_DYLD_CHAINED_FIXUPS) {
-                KextFixupsCmd = (MACH_LINKEDIT_DATA_COMMAND *)KextCmd;
-                break;
-              }
-
-              KextCmdOff += KextCmd->CommandSize;
-            }
-          }
-
-          KextFixupCount = 0;
-
-          if (KextFixupsCmd != NULL) {
-            KextFixupsHdr = (MACHO_DYLD_CHAINED_FIXUPS_HEADER *)(
-                              Prelinked->SystemKC + KextFixupsCmd->DataOffset
-                              );
-            KextStarts = (MACH_DYLD_CHAINED_STARTS_IN_IMAGE *)(
-                           (UINT8 *)KextFixupsHdr + KextFixupsHdr->StartsOffset
-                           );
-
-            for (KextSegIdx = 0; KextSegIdx < KextStarts->NumSegments; ++KextSegIdx) {
-              if (KextStarts->SegInfoOffset[KextSegIdx] == 0) {
-                continue;
-              }
-
-              KextStartsSeg = (MACH_DYLD_CHAINED_STARTS_IN_SEGMENT *)(
-                                (UINT8 *)KextStarts + KextStarts->SegInfoOffset[KextSegIdx]
-                                );
-
-              if (  (KextStartsSeg->PointerFormat != MACH_DYLD_CHAINED_PTR_X86_64_KERNEL_CACHE)
-                 && (KextStartsSeg->PointerFormat != MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE))
-              {
-                continue;
-              }
-
-              for (KextPageIdx = 0; KextPageIdx < KextStartsSeg->PageCount; ++KextPageIdx) {
-                if (KextStartsSeg->PageStart[KextPageIdx] == MACH_DYLD_CHAINED_PTR_START_NONE) {
-                  continue;
-                }
-
-                KextFixupLoc = (UINT64 *)(
-                                 Prelinked->SystemKC + KextStartsSeg->SegmentOffset
-                                 + (UINT64)KextPageIdx * KextStartsSeg->PageSize
-                                 + KextStartsSeg->PageStart[KextPageIdx]
-                                 );
-
-                while (TRUE) {
-                  KextFixup = (MACH_DYLD_CHAINED_PTR_64_KERNEL_CACHE_REBASE *)KextFixupLoc;
-
-                  //
-                  // Resolve target address based on cache level:
-                  // CacheLevel 0 = this KC (System KC) — Target is direct vmaddr
-                  // CacheLevel 1 = Boot KC — Target is vmaddr in Boot KC space
-                  // Both use Target as the resolved pointer value.
-                  //
-                  *KextFixupLoc = (UINT64)KextFixup->Target;
-                  ++KextFixupCount;
-
-                  if (KextFixup->Next == 0) {
-                    break;
-                  }
-
-                  KextFixupLoc = (UINT64 *)((UINT8 *)KextFixupLoc + KextFixup->Next);
-                }
-              }
-            }
-          }
-
-          DEBUG ((
-            DEBUG_INFO,
-            "OCAK: OpenCore15 - Applied %u chained fixups for %a\n",
-            KextFixupCount,
-            Identifier
-            ));
-        }
-
-        //
-        // Connect symtab from the System KC inner context so the kext
-        // can resolve symbols from the shared symbol table.
-        //
-        MachoInitialiseSymtabsExternal (
-          &NewKext->Context.MachContext,
-          &Prelinked->SystemKCInnerMachContext
-          );
-
-        NewKext->Signature                  = PRELINKED_KEXT_SIGNATURE;
-        NewKext->Identifier                 = Identifier;
-        NewKext->BundleLibraries            = NULL;
-        NewKext->Context.VirtualBase        = FilesetEntry->VirtualAddress;
-        NewKext->Context.VirtualKmod        = 0;
-        NewKext->Context.IsKernelCollection = TRUE;
-        NewKext->Context.Is32Bit            = FALSE;
-
-        DEBUG ((
-          DEBUG_INFO,
-          "OCAK: OpenCore15 - Created System KC dependency %a (VA 0x%Lx)\n",
-          Identifier,
-          FilesetEntry->VirtualAddress
-          ));
-
-        return NewKext;
-      }
+    if (Command->CommandType != MACH_LOAD_COMMAND_FILESET_ENTRY) {
+      CmdOffset += Command->CommandSize;
+      continue;
     }
 
-    CmdOffset += Command->CommandSize;
+    FilesetEntry = (MACH_FILESET_ENTRY_COMMAND *)Command;
+    EntryName    = (CONST CHAR8 *)((UINT8 *)FilesetEntry + FilesetEntry->EntryId.Offset);
+
+    if (AsciiStrCmp (EntryName, Identifier) != 0) {
+      CmdOffset += Command->CommandSize;
+      continue;
+    }
+
+    NewKext = AllocateZeroPool (sizeof (*NewKext));
+    if (NewKext == NULL) {
+      return NULL;
+    }
+
+    //
+    // Initialise a Mach-O context covering the whole System KC but pointed
+    // at the fileset entry's header offset. This mirrors how Boot KC kexts
+    // are initialised so that LC_SYMTAB, LC_DYSYMTAB and friends resolve
+    // into the KC's shared __LINKEDIT data.
+    //
+    if (!MachoInitializeContext64 (
+           &NewKext->Context.MachContext,
+           Prelinked->SystemKC,
+           Prelinked->SystemKCSize,
+           (UINT32)FilesetEntry->FileOffset,
+           (UINT32)(Prelinked->SystemKCSize - FilesetEntry->FileOffset)
+           ))
+    {
+      DEBUG ((DEBUG_WARN, "OCAK: System KC MachContext init failed for %a\n", Identifier));
+      FreePool (NewKext);
+      return NULL;
+    }
+
+    FixupCount = InternalApplyFilesetKextFixups (
+                   Prelinked->SystemKC,
+                   &NewKext->Context.MachContext
+                   );
+
+    //
+    // Wire the kext's symtab up to the System KC's inner context so
+    // later lookups reach the shared symbol table.
+    //
+    MachoInitialiseSymtabsExternal (
+      &NewKext->Context.MachContext,
+      &Prelinked->SystemKCInnerMachContext
+      );
+
+    NewKext->Signature                  = PRELINKED_KEXT_SIGNATURE;
+    NewKext->Identifier                 = Identifier;
+    NewKext->BundleLibraries            = NULL;
+    NewKext->Context.VirtualBase        = FilesetEntry->VirtualAddress;
+    NewKext->Context.VirtualKmod        = 0;
+    NewKext->Context.IsKernelCollection = TRUE;
+    NewKext->Context.Is32Bit            = FALSE;
+
+    DEBUG ((
+      DEBUG_INFO,
+      "OCAK: System KC resolved %a (VA 0x%Lx, %u fixups)\n",
+      Identifier,
+      FilesetEntry->VirtualAddress,
+      FixupCount
+      ));
+
+    return NewKext;
   }
 
   return NULL;
@@ -884,8 +889,13 @@ InternalInsertPrelinkedKextDependency (
 
   Status = InternalScanPrelinkedKext (DependencyKext, Context, TRUE);
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - Dependency scan failed for %a (dep of %a) - %r\n",
-      DependencyKext->Identifier, Kext->Identifier, Status));
+    DEBUG ((
+      DEBUG_INFO,
+      "OCAK: Dependency scan failed for %a (dep of %a) - %r\n",
+      DependencyKext->Identifier,
+      Kext->Identifier,
+      Status
+      ));
     return Status;
   }
 
@@ -973,24 +983,25 @@ InternalCachedPrelinkedKext (
 
   if (NewKext == NULL) {
     //
-    // OpenCore15: For kernel collections (macOS 11+), system kexts like
-    // IOGraphicsFamily are in the System KC, not the Boot KC. OpenCore
-    // only loads the Boot KC. Search the System KC fileset entries for
-    // the missing dependency and create a PRELINKED_KEXT with real
-    // Mach-O data for proper symbol table and vtable resolution.
+    // On kernel-collection boots (macOS 11+) common kext libraries such
+    // as IOGraphicsFamily ship in the System KC, not the Boot KC that
+    // OpenCore injects into. If a System KC has been loaded, walk its
+    // LC_FILESET_ENTRY table looking for Identifier; if present, borrow
+    // its Mach-O so symbol and vtable resolution can complete.
+    //
+    // If no matching fileset entry exists, fall back to a kernel-symbol
+    // stub. The stub cannot supply vtables for subclassing but keeps
+    // basic symbol lookups (weak-test symbol, etc.) from crashing.
     //
     if (Prelinked->IsKernelCollection) {
-      DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - Dependency %a not in Boot KC, searching System KC\n", Identifier));
-
       NewKext = InternalFindSystemKCDependency (Prelinked, Identifier);
 
       if (NewKext == NULL) {
-        //
-        // Fallback: create a stub using kernel symbols.
-        // This won't work for vtable patching but prevents crashes
-        // for dependencies that only need basic symbol resolution.
-        //
-        DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - %a not in System KC either, using kernel stub\n", Identifier));
+        DEBUG ((
+          DEBUG_INFO,
+          "OCAK: %a not in Boot KC or System KC, using kernel stub\n",
+          Identifier
+          ));
 
         NewKext = AllocateZeroPool (sizeof (*NewKext));
         if (NewKext != NULL) {
@@ -1382,21 +1393,13 @@ InternalScanPrelinkedKext (
       //
       Status = InternalScanBuildLinkedSymbolTable (Kext, Context);
       if (EFI_ERROR (Status)) {
-        DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - LinkedSymbolTable failed for %a - %r\n", Kext->Identifier, Status));
         return Status;
       }
-
-      DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - LinkedSymbolTable OK for %a (%u symbols, %u C++)\n",
-        Kext->Identifier, Kext->NumberOfSymbols, Kext->NumberOfCxxSymbols));
 
       Status = InternalScanBuildLinkedVtables (Kext, Context);
       if (EFI_ERROR (Status)) {
-        DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - LinkedVtables failed for %a - %r\n", Kext->Identifier, Status));
         return Status;
       }
-
-      DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - LinkedVtables OK for %a (%u vtables)\n",
-        Kext->Identifier, Kext->NumberOfVtables));
     }
   }
 
@@ -1437,7 +1440,6 @@ InternalLinkPrelinkedKext (
 
   Status = InternalScanPrelinkedKext (Kext, Context, FALSE);
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - InternalLinkPrelinkedKext scan failed for %a - %r\n", Kext->Identifier, Status));
     InternalFreePrelinkedKext (Kext);
     return NULL;
   }
@@ -1485,7 +1487,6 @@ InternalLinkPrelinkedKext (
   Status = InternalPrelinkKext (Context, Kext, LoadAddress, FileOffset);
 
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - InternalPrelinkKext failed for %a - %r\n", Kext->Identifier, Status));
     InternalFreePrelinkedKext (Kext);
     return NULL;
   }

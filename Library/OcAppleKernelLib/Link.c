@@ -386,27 +386,30 @@ InternalSolveSymbolNonWeak (
                     OcGetSymbolFirstLevel
                     );
   if (ResolveSymbol != NULL) {
-    UINT64 FixedValue = ResolveSymbol->Value;
+    UINT64  ResolvedValue;
+
+    ResolvedValue = ResolveSymbol->Value;
 
     //
-    // mos15: System KC symbols have raw virtual addresses (e.g. 0x149xxxxx)
-    // in the range 1MB - 512MB. These need translation to kernel address
-    // space so 32-bit RIP-relative relocations can reach them.
+    // System KC kexts expose symbols with raw fileset virtual addresses
+    // (e.g. 0x149xxxxx, in the 1 MB .. 512 MB range). These must be
+    // translated into the kernel address space before the link phase
+    // emits RIP-relative relocations, otherwise the 32-bit displacements
+    // cannot reach them. The translation mirrors KcFixupValue (), which
+    // performs the same adjustment for vtable pointers; on macOS 11+
+    // all kernel collections share a single KASLR slide.
     //
-    // The formula matches KcFixupValue() which handles the same translation
-    // for vtable entries. All KCs share the same KASLR slide on macOS 11+.
-    //
-    // Only translate values clearly in System KC range (0x100000 - 0x20000000).
-    // Zero, weak test symbols, and kernel-range values are NOT translated.
+    // Kernel-space values, zero, and weak test placeholders must not
+    // be translated.
     //
     if (  !Context->Is32Bit
-       && (FixedValue >= 0x100000)
-       && (FixedValue < 0x20000000))
+       && (ResolvedValue >= BASE_1MB)
+       && (ResolvedValue < BASE_1MB * 512ULL))
     {
-      FixedValue = FixedValue + KERNEL_FIXUP_OFFSET + KERNEL_ADDRESS_BASE;
+      ResolvedValue = ResolvedValue + KERNEL_FIXUP_OFFSET + KERNEL_ADDRESS_BASE;
     }
 
-    InternalSolveSymbolValue (Context->Is32Bit, FixedValue, Symbol);
+    InternalSolveSymbolValue (Context->Is32Bit, ResolvedValue, Symbol);
   }
 
   return TRUE;
@@ -597,8 +600,12 @@ InternalCalculateDisplacementIntel64 (
   Difference   = ABS (Displacement);
 
   if (Difference >= X86_64_RIP_RELATIVE_LIMIT) {
-    DEBUG ((DEBUG_WARN, "OCAK: mos15 displacement overflow: target=0x%Lx diff=0x%Lx\n",
-      Target, Difference));
+    DEBUG ((
+      DEBUG_INFO,
+      "OCAK: RIP-relative displacement overflow: target=0x%Lx diff=0x%Lx\n",
+      Target,
+      Difference
+      ));
     return FALSE;
   }
 
@@ -1246,14 +1253,6 @@ InternalRelocateAndCopyRelocations (
                NextRelocation
                );
     if (Result == MAX_UINTN) {
-      DEBUG ((DEBUG_WARN, "OCAK: mos15 reloc failed idx %u/%u addr=0x%x sym=%u ext=%d type=%d len=%d for %a\n",
-        Index, *NumRelocations,
-        SourceRelocations[Index].Address,
-        SourceRelocations[Index].SymbolNumber,
-        SourceRelocations[Index].Extern,
-        SourceRelocations[Index].Type,
-        SourceRelocations[Index].Size,
-        Kext->Identifier));
       return FALSE;
     }
 
@@ -1638,13 +1637,10 @@ InternalPrelinkKext (
   if (  !IsObject32
      && (((Context->Is32Bit ? MachHeader->Header32.Flags : MachHeader->Header64.Flags) & MACH_HEADER_FLAG_DYNAMIC_LINKER_LINK) == 0))
   {
-    DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - Prelink skip (no DYNAMIC_LINKER_LINK flag) for kext\n"));
     return EFI_SUCCESS;
   }
 
   if ((!IsObject32 && (LinkEditSegment == NULL)) || (Kext->Context.VirtualKmod == 0)) {
-    DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - Prelink fail: LinkEdit=%p VirtualKmod=0x%Lx\n",
-      LinkEditSegment, Kext->Context.VirtualKmod));
     return EFI_UNSUPPORTED;
   }
 
@@ -1670,10 +1666,7 @@ InternalPrelinkKext (
                  &UndefinedSymtab,
                  &NumUndefinedSymbols
                  );
-  DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - Prelink symtab: %u total, %u local, %u extern, %u undef for %a\n",
-    NumSymbols, NumLocalSymbols, NumExternalSymbols, NumUndefinedSymbols, Kext->Identifier));
   if (NumSymbols == 0) {
-    DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - Prelink FAIL: no symbols for %a\n", Kext->Identifier));
     return EFI_UNSUPPORTED;
   }
 
@@ -1723,9 +1716,6 @@ InternalPrelinkKext (
   if (  !IsObject32
      && (LinkEditSize > (Context->Is32Bit ? LinkEditSegment->Segment32.FileSize : LinkEditSegment->Segment64.FileSize)))
   {
-    DEBUG ((DEBUG_INFO, "OCAK: OpenCore15 - Prelink FAIL: LinkEdit too large (%u > %Lu) for %a\n",
-      LinkEditSize, (Context->Is32Bit ? LinkEditSegment->Segment32.FileSize : LinkEditSegment->Segment64.FileSize),
-      Kext->Identifier));
     return EFI_UNSUPPORTED;
   }
 
@@ -1811,28 +1801,13 @@ InternalPrelinkKext (
                    );
     if (!Result) {
       DEBUG ((
-        DEBUG_WARN,
-        "OCAK: mos15 UNRESOLVED symbol %a for %a (idx %u/%u)\n",
+        DEBUG_INFO,
+        "OCAK: Symbol %a was unresolved for kext %a\n",
         MachoGetSymbolName (MachoContext, Symbol),
-        Kext->Identifier,
-        Index,
-        NumUndefinedSymbols
+        Kext->Identifier
         ));
       return EFI_LOAD_ERROR;
     } else {
-      //
-      // mos15: Log symbols resolved to low addresses (System KC range) for debugging
-      //
-      if ((Context->Is32Bit ? Symbol->Symbol32.Value : Symbol->Symbol64.Value) < KERNEL_ADDRESS_BASE) {
-        DEBUG ((
-          DEBUG_WARN,
-          "OCAK: mos15 LOW ADDR symbol %a = 0x%Lx for %a\n",
-          MachoGetSymbolName (MachoContext, Symbol),
-          (Context->Is32Bit ? (UINT64)Symbol->Symbol32.Value : Symbol->Symbol64.Value),
-          Kext->Identifier
-          ));
-      }
-
       DEBUG ((
         DEBUG_VERBOSE,
         "OCAK: Symbol %a was resolved for kext %a to %Lx\n",
@@ -1848,7 +1823,7 @@ InternalPrelinkKext (
   //
   Result = InternalPatchByVtables (Context, Kext);
   if (!Result) {
-    DEBUG ((DEBUG_WARN, "OCAK: mos15 VTABLE PATCHING FAILED for %a\n", Kext->Identifier));
+    DEBUG ((DEBUG_INFO, "OCAK: Vtable patching failed for kext %a\n", Kext->Identifier));
     return EFI_LOAD_ERROR;
   }
 
@@ -1866,7 +1841,6 @@ InternalPrelinkKext (
                &KmodInfoOffset
                );
     if (!Result) {
-      DEBUG ((DEBUG_WARN, "OCAK: mos15 FAIL #1 local reloc for %a\n", Kext->Identifier));
       return EFI_LOAD_ERROR;
     }
   }
@@ -1879,7 +1853,6 @@ InternalPrelinkKext (
              &KmodInfoOffset
              );
   if (!Result || (KmodInfoOffset == 0)) {
-    DEBUG ((DEBUG_WARN, "OCAK: mos15 FAIL #2 extern reloc/kmod for %a (result=%d kmod=0x%Lx)\n", Kext->Identifier, Result, (UINT64)KmodInfoOffset));
     return EFI_LOAD_ERROR;
   }
 
@@ -1892,7 +1865,6 @@ InternalPrelinkKext (
 
   Result = InternalProcessSymbolPointers (MachoContext, DySymtab, LoadAddressOffset);
   if (!Result) {
-    DEBUG ((DEBUG_WARN, "OCAK: mos15 FAIL #3 symbol pointers for %a\n", Kext->Identifier));
     return EFI_LOAD_ERROR;
   }
 
@@ -1919,7 +1891,6 @@ InternalPrelinkKext (
                      &TargetRelocation[0]
                      );
   if (!Result) {
-    DEBUG ((DEBUG_WARN, "OCAK: mos15 FAIL #4 local reloc copy for %a\n", Kext->Identifier));
     return EFI_LOAD_ERROR;
   }
 
@@ -1941,7 +1912,6 @@ InternalPrelinkKext (
                         &TargetRelocation[NumRelocations]
                         );
     if (!Result) {
-      DEBUG ((DEBUG_WARN, "OCAK: mos15 FAIL #5 extern reloc copy for %a\n", Kext->Identifier));
       return EFI_LOAD_ERROR;
     }
 

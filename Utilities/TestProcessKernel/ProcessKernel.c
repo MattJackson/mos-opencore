@@ -480,8 +480,7 @@ WrapMain (
                       &NewPrelinkedSize,
                       AllocSize,
                       LinkedExpansion,
-                      ReservedExeSize,
-                      NULL
+                      ReservedExeSize
                       );
   if (EFI_ERROR (PrelinkedStatus)) {
     DEBUG ((DEBUG_WARN, "[FAIL] Kernel process - %r\n", PrelinkedStatus));

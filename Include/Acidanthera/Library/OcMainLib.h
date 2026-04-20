@@ -183,15 +183,14 @@ OcKernelBlockKexts (
 **/
 EFI_STATUS
 OcKernelProcessPrelinked (
-  IN     OC_GLOBAL_CONFIG   *Config,
-  IN     UINT32             DarwinVersion,
-  IN     BOOLEAN            Is32Bit,
-  IN OUT UINT8              *Kernel,
-  IN     UINT32             *KernelSize,
-  IN     UINT32             AllocatedSize,
-  IN     UINT32             LinkedExpansion,
-  IN     UINT32             ReservedExeSize,
-  IN     EFI_FILE_PROTOCOL  *RootFile  OPTIONAL
+  IN     OC_GLOBAL_CONFIG  *Config,
+  IN     UINT32            DarwinVersion,
+  IN     BOOLEAN           Is32Bit,
+  IN OUT UINT8             *Kernel,
+  IN     UINT32            *KernelSize,
+  IN     UINT32            AllocatedSize,
+  IN     UINT32            LinkedExpansion,
+  IN     UINT32            ReservedExeSize
   );
 
 /**
