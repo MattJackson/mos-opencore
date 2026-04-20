@@ -1,0 +1,87 @@
+From 2f4da75b35819a3fef9113bc5475a1d981e9f7fd Mon Sep 17 00:00:00 2001
+From: Matthew Jackson <matthew@pq.io>
+Date: Mon, 20 Apr 2026 14:55:07 -0700
+Subject: [PATCH 3/5] OcAppleKernelLib: Translate System KC symbol addresses at
+ link time
+
+System KC kexts carry symbol values that reference fileset virtual
+addresses (typically in the 1 MB .. 512 MB range on x86_64, e.g.
+0x149xxxxx). When the Boot KC linker resolves a symbol against a
+System KC dependency it receives this raw value; feeding it into
+InternalSolveSymbolValue () unchanged produces RIP-relative relocations
+whose 32-bit displacements cannot reach the final kernel address
+space, so InternalCalculateDisplacementIntel64 () trips the
+X86_64_RIP_RELATIVE_LIMIT check and the link fails.
+
+The adjustment is the same one that KcFixupValue () performs for vtable
+entries:
+
+    address_in_kernel_space = raw + KERNEL_FIXUP_OFFSET + KERNEL_ADDRESS_BASE
+
+On macOS 11+ all kernel collections share a single KASLR slide, so the
+translation is a constant. Kernel-space values, zero, and the weak
+test placeholder must not be translated, which is why the guard only
+applies to values clearly in the fileset-VA band (1 MB .. 512 MB).
+
+Also downgrade the RIP-relative displacement overflow log from an
+unprinted no-op to a DEBUG_INFO trace with the target and difference,
+which makes diagnosing related link failures practical without
+introducing WARN-level noise for normal operation.
+
+Signed-off-by: Matthew Jackson <matthew@pq.io>
+---
+ Library/OcAppleKernelLib/Link.c | 31 ++++++++++++++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/Library/OcAppleKernelLib/Link.c b/Library/OcAppleKernelLib/Link.c
+index d8d55e1..c024b7f 100644
+--- a/Library/OcAppleKernelLib/Link.c
++++ b/Library/OcAppleKernelLib/Link.c
+@@ -386,7 +386,30 @@ InternalSolveSymbolNonWeak (
+                     OcGetSymbolFirstLevel
+                     );
+   if (ResolveSymbol != NULL) {
+-    InternalSolveSymbolValue (Context->Is32Bit, ResolveSymbol->Value, Symbol);
++    UINT64  ResolvedValue;
++
++    ResolvedValue = ResolveSymbol->Value;
++
++    //
++    // System KC kexts expose symbols with raw fileset virtual addresses
++    // (e.g. 0x149xxxxx, in the 1 MB .. 512 MB range). These must be
++    // translated into the kernel address space before the link phase
++    // emits RIP-relative relocations, otherwise the 32-bit displacements
++    // cannot reach them. The translation mirrors KcFixupValue (), which
++    // performs the same adjustment for vtable pointers; on macOS 11+
++    // all kernel collections share a single KASLR slide.
++    //
++    // Kernel-space values, zero, and weak test placeholders must not
++    // be translated.
++    //
++    if (  !Context->Is32Bit
++       && (ResolvedValue >= BASE_1MB)
++       && (ResolvedValue < BASE_1MB * 512ULL))
++    {
++      ResolvedValue = ResolvedValue + KERNEL_FIXUP_OFFSET + KERNEL_ADDRESS_BASE;
++    }
++
++    InternalSolveSymbolValue (Context->Is32Bit, ResolvedValue, Symbol);
+   }
+ 
+   return TRUE;
+@@ -577,6 +600,12 @@ InternalCalculateDisplacementIntel64 (
+   Difference   = ABS (Displacement);
+ 
+   if (Difference >= X86_64_RIP_RELATIVE_LIMIT) {
++    DEBUG ((
++      DEBUG_INFO,
++      "OCAK: RIP-relative displacement overflow: target=0x%Lx diff=0x%Lx\n",
++      Target,
++      Difference
++      ));
+     return FALSE;
+   }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

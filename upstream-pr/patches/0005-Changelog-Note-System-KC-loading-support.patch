@@ -1,0 +1,25 @@
+From b87ba683313552070c41d2f2da485642c2623d4f Mon Sep 17 00:00:00 2001
+From: Matthew Jackson <matthew@pq.io>
+Date: Mon, 20 Apr 2026 14:55:40 -0700
+Subject: [PATCH 5/5] Changelog: Note System KC loading support
+
+Signed-off-by: Matthew Jackson <matthew@pq.io>
+---
+ Changelog.md | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Changelog.md b/Changelog.md
+index 68fae2f..207a508 100644
+--- a/Changelog.md
++++ b/Changelog.md
+@@ -1,6 +1,7 @@
+ OpenCore Changelog
+ ==================
+ #### v1.0.7
++- Added System KC loading and cross-KC dependency resolution in OcAppleKernelLib
+ - Improved `XhciPortLimit` compatibility with macOS Tahoe, thx @laobamac
+ - Updated builtin firmware versions for SMBIOS and the rest
+ - Migrated to edk2-stable202511
+-- 
+2.50.1 (Apple Git-155)
+
