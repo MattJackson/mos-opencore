@@ -1,10 +1,36 @@
 # PR #600 — CI Status
 
 **PR:** [acidanthera/OpenCorePkg#600 — OcAppleKernelLib: System KC loading and cross-KC dependency resolution](https://github.com/acidanthera/OpenCorePkg/pull/600)
-**Snapshot taken:** 2026-04-20
+**Snapshot taken:** 2026-04-20 (PM re-validation)
 **State:** OPEN, MERGEABLE, no review decision yet (awaiting acidanthera reviewer)
 **Author:** MattJackson (Matthew Jackson <matthew@pq.io>)
 **Head commit:** `657329a` (uncrustify fix applied on top of original 5-patch series)
+**Upstream master SHA:** `dab2d91b0cba3bf4d0da4ccf98a6576cc580cdaf` ("Bump version") — unchanged since the series was staged, so no drift has occurred.
+
+## Re-validation (2026-04-20 PM)
+
+Cloned `acidanthera/OpenCorePkg:master` fresh into `/tmp/oc-current`
+and re-tested the staged series in `upstream-pr/patches/`:
+
+| Patch | `git apply --check` | Sequential `git am` |
+|---|---|---|
+| 0001-OcAppleKernelLib-Add-System-KC-context-loading | clean | clean |
+| 0002-OcAppleKernelLib-Resolve-cross-KC-deps-via-LC_FILESET_ENTRY | clean | clean |
+| 0003-OcAppleKernelLib-Translate-System-KC-symbol-addresses | clean | clean |
+| 0004-OcMainLib-Stage-System-KC-for-prelinked-injection | clean | clean |
+| 0005-Changelog-Note-System-KC-loading-support | clean | clean |
+
+All 5 patches apply cleanly on top of `dab2d91`. No rebase required.
+The `upstream-pr/patches/*.patch` files are unchanged from their
+2026-04-20 AM staging.
+
+**Reviewer activity:** none. `gh api repos/acidanthera/OpenCorePkg/pulls/600/comments`,
+`.../reviews`, and `.../issues/600/comments` all return `[]`. Still
+"awaiting first review" — no acidanthera-side nits, requests, or
+questions to respond to.
+
+**CI:** still green on head `657329a` (see per-job table below).
+No new runs triggered since the AM snapshot; nothing to chase.
 
 ## Verdict
 
