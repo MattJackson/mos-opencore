@@ -141,4 +141,4 @@ record of the submission.
 - GitHub PR body source: [`upstream-pr/PR_DESCRIPTION.md`](./upstream-pr/PR_DESCRIPTION.md)
 - Test plan: [`upstream-pr/TESTING.md`](./upstream-pr/TESTING.md)
 - Mos-suite dashboard (every upstream contribution across the suite):
-  `/Users/mjackson/mos/paravirt-re/upstream-submissions-status.md`
+  `/Users/mjackson/Developer/mos/paravirt-re/upstream-submissions-status.md`

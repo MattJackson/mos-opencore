@@ -39,7 +39,7 @@ cd /path/to/your/OpenCorePkg-fork
 git checkout -b system-kc-loading origin/master
 
 # Apply the patches in order
-for p in /Users/mjackson/opencore-mos15/upstream-pr/patches/*.patch; do
+for p in /Users/mjackson/Developer/opencore-mos15/upstream-pr/patches/*.patch; do
     git am < "$p"
 done
 
@@ -49,14 +49,14 @@ git push -u origin system-kc-loading
 gh pr create \
     --repo acidanthera/OpenCorePkg \
     --title "OcAppleKernelLib: Add System KC loading and cross-KC dependency resolution" \
-    --body-file /Users/mjackson/opencore-mos15/upstream-pr/PR_DESCRIPTION.md
+    --body-file /Users/mjackson/Developer/opencore-mos15/upstream-pr/PR_DESCRIPTION.md
 ```
 
 ### Option B: format-patch mail workflow (if acidanthera later adopts one)
 
 ```sh
 # Patches already formatted; just attach them.
-ls /Users/mjackson/opencore-mos15/upstream-pr/patches/*.patch
+ls /Users/mjackson/Developer/opencore-mos15/upstream-pr/patches/*.patch
 ```
 
 ## Maintainer-side verification
