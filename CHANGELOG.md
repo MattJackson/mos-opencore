@@ -18,6 +18,14 @@ look here for upstream-release-level changes.
 - Repository hygiene meta files: `CHANGELOG.md`, `SECURITY.md`,
   `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`.
 
+### Changed
+
+- Relicensed the fork-local additions (`LICENSE.mos-additions`) from
+  AGPL-3.0 to BSD-3-Clause to match upstream OpenCore. Upstream
+  OpenCorePkg files remain BSD-3-Clause under their original headers and
+  `LICENSE.txt`. Standardized `README.md` (badge row, Contributing /
+  Security / Changelog / License sections).
+
 ## [0.5.0] - 2026-04-20
 
 Research-complete snapshot. Not on the mos suite's active injection path.

@@ -14,4 +14,4 @@ Measured progress: System KC loads cleanly, 1590 symbols + 56 vtables resolved f
 
 ## License
 
-AGPL-3.0; OpenCore-derived files retain BSD-3-Clause attribution per upstream.
+BSD-3-Clause; OpenCore-derived files retain BSD-3-Clause attribution per upstream.

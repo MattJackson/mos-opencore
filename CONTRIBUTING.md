@@ -45,4 +45,4 @@ See PR [#600](https://github.com/acidanthera/OpenCorePkg/pull/600) — the Syste
 
 ## License
 
-OpenCore-derived files retain BSD-3-Clause (`LICENSE.txt`). The mos-additions (tooling, documentation) are AGPL-3.0 (`LICENSE.mos-additions`).
+OpenCore-derived files retain BSD-3-Clause (`LICENSE.txt`). The mos-additions (tooling, documentation) are BSD-3-Clause (`LICENSE.mos-additions`).
