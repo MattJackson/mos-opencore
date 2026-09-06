@@ -129,9 +129,9 @@ record of the submission.
 
 - Upstream OpenCorePkg files: BSD-3-Clause (unchanged).
 - This overlay / staging repo (README, LICENSE.mos-additions,
-  glue files): AGPL-3.0.
+  glue files): BSD-3-Clause.
 - Patches destined for upstream carry upstream's BSD-3-Clause
-  license and do not introduce AGPL into acidanthera's tree.
+  license, consistent with the additions' license.
 
 ## Cross-references
 

@@ -1,5 +1,8 @@
 # mos-opencore
 
+[![Release](https://img.shields.io/github/v/release/MattJackson/mos-opencore?display_name=tag&sort=semver)](https://github.com/MattJackson/mos-opencore/releases)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE.txt)
+
 OpenCore source patches for running macOS 15 (Sequoia) as a guest in QEMU/KVM. Overlay on OpenCore 1.0.8.
 
 > **Status: v0.5 — experimental; not the active injection path.** The System-KC-injection feature in these patches is an open research item. The mos suite's active approach uses Boot-KC-only injection with a runtime kernel patcher ([mos-patcher](https://github.com/MattJackson/mos-patcher)). These patches remain here for the case where a kext genuinely needs a System-KC class as a direct linker dependency — we're not using that path today.
@@ -69,6 +72,26 @@ Based on OpenCore 1.0.8 (commit `dab2d91b0cba3bf4d0da4ccf98a6576cc580cdaf`). Whe
 - [mos-qemu](https://github.com/MattJackson/mos-qemu) — QEMU patches
 - [mos-patcher](https://github.com/MattJackson/mos-patcher) — kernel-side hook framework (Lilu replacement)
 
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+workflow, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community
+expectations.
+
+## Security
+
+To report a vulnerability, please follow the process in
+[SECURITY.md](SECURITY.md).
+
+## Changelog
+
+Notable changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
-[GNU AGPL-3.0](LICENSE). OpenCore itself is [BSD-3-Clause](https://github.com/acidanthera/OpenCorePkg/blob/master/LICENSE.txt); the unmodified upstream files retain that license and its attribution requirements. Our modifications and additions in this repo are AGPL-3.0.
+This repository is a fork/port of [Acidanthera OpenCore](https://github.com/acidanthera/OpenCorePkg).
+
+- **Upstream OpenCore code** (files under `Include/Acidanthera/`, `Library/`, and `Utilities/`, carrying the OpenCore BSD file headers) is licensed **BSD-3-Clause** and remains © the OpenCore authors (vit9696, Download-Fritz, HermitCrabs Lab, savvas, and contributors). See [LICENSE.txt](LICENSE.txt). These files retain their upstream headers and attribution requirements unchanged.
+- **This repo's own additions** (the mos-specific overlay changes, tooling, and documentation) are licensed **BSD-3-Clause** © 2026 Matthew Jackson. See [LICENSE.mos-additions](LICENSE.mos-additions).
+
+Both licenses are BSD-3-Clause, so the additions are license-compatible with the upstream OpenCore code they overlay.
