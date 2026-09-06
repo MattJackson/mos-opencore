@@ -1,5 +1,7 @@
 # mos-opencore
 
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/MattJackson)
+
 [![Release](https://img.shields.io/github/v/release/MattJackson/mos-opencore?display_name=tag&sort=semver)](https://github.com/MattJackson/mos-opencore/releases)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE.txt)
 
